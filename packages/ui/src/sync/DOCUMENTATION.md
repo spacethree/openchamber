@@ -200,7 +200,7 @@ Rules:
 1. If an action mutates session list membership or visible session metadata, update `useGlobalSessionsStore` there.
 2. If an action targets a session by ID, resolve the **session's own directory**. Do not assume the current directory is correct.
 3. `session-ui-store.ts` should delegate to `session-actions.ts` for these mutations instead of duplicating SDK calls.
-4. Sending after a revert commits the new branch optimistically: remove the reverted tail and marker before inserting the new message, and restore both if the send is rejected.
+4. Sending after a revert keeps `session.revert` authoritative. The server retains the discarded branch, so the client must not clear the marker or delete the reverted tail locally — any later authoritative materialization would resurrect it next to the replacement and produce duplicates. Instead, `optimisticSend` records the replacement message ID in the directory-scoped `postRevertBranch` overlay (`message-visibility.ts`), and timeline/user-history/dock visibility is derived as "before the marker OR from the replacement onward". A repeat send against the same marker keeps the existing boundary; a failed send retires only the overlay it opened. A confirmed newer revert, unrevert, marker-changing session update, or cache eviction also retires the overlay. The overlay is in-memory UI continuity, never persisted.
 
 Examples of global-store updates performed in `session-actions.ts`:
 
@@ -258,6 +258,8 @@ Keep this in sync with `handleDirectoryEvent` in `sync-context.tsx`:
 | `permission.asked/replied` | `permission` |
 | `question.asked/replied/rejected` | `question` |
 | `lsp.updated` | `lsp` |
+
+`postRevertBranch` never appears in this table on purpose: reducers only **reassign** it (`draft.postRevertBranch = ...`) when a session replace or trim retires an overlay, they never mutate it in place — so it needs no pre-clone. Keep it that way when touching overlay state.
 
 ## Adding a new event type
 

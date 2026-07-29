@@ -35,6 +35,11 @@ import { waitForWorktreeBootstrap } from "@/lib/worktrees/worktreeBootstrap"
 import { getWorktreeSetupWaitEnabled } from "@/lib/openchamberConfig"
 import { resolveProjectForSessionDirectory } from "@/lib/projectResolution"
 import {
+  getEffectiveVisibleMessages,
+  getSessionRevertMessageID,
+  hasEffectivePostRevertBranch,
+} from "./message-visibility"
+import {
   getSyncSessions,
   getAllSyncSessions,
   getSyncMessages,
@@ -1328,26 +1333,23 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
   // handleSlashUndo — reads from sync, records history for redo
   // ---------------------------------------------------------------------------
   handleSlashUndo: async (sessionId) => {
-    const messages = getSyncMessages(sessionId)
-    const sessions = getSyncSessions()
-    const currentSession = sessions.find((s) => s.id === sessionId)
-
-    const userMessages = messages.filter((m) => m.role === "user")
+    const state = getDirectoryState()
+    const currentSession = state?.session.find((session) => session.id === sessionId)
+    // Undo walks the EFFECTIVE timeline: after a post-revert replacement send,
+    // the last visible user message is the replacement branch head, not a
+    // message hidden inside the discarded interval.
+    const visibleMessages = getEffectiveVisibleMessages(
+      state?.message[sessionId] ?? [],
+      currentSession,
+      state?.postRevertBranch[sessionId],
+    )
+    const userMessages = visibleMessages.filter((message) => message.role === "user")
     if (userMessages.length === 0) return
 
-    const revertToId = currentSession?.revert?.messageID
-    let targetMessage: typeof messages[number] | undefined
-    if (revertToId) {
-      targetMessage = [...userMessages].reverse().find((m) => m.id < revertToId)
-    } else {
-      targetMessage = userMessages[userMessages.length - 1]
-    }
+    const targetMessage = userMessages[userMessages.length - 1]
 
-    if (!targetMessage) return
-
-    // Read target message parts BEFORE calling revertToMessage.
-    // revertToMessage optimistically deletes messages from the sync store
-    // before the API call, so getSyncParts must run first.
+    // Read target message parts BEFORE calling revertToMessage, so the toast
+    // preview is captured from the still-materialized message.
     const targetParts = getSyncParts(targetMessage.id)
     const textPart = targetParts.find((p: Part) => p.type === "text") as TextPart | undefined
     const preview = textPart?.text
@@ -1377,14 +1379,19 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       return
     }
 
-    const sessions = getSyncSessions()
-    const currentSession = sessions.find((s) => s.id === sessionId)
-    const revertToId = currentSession?.revert?.messageID
+    const state = getDirectoryState()
+    const currentSession = state?.session.find((session) => session.id === sessionId)
+    const revertToId = getSessionRevertMessageID(currentSession)
     if (!revertToId) return
+
+    // A replacement branch diverges from the hidden history. Do not let /redo
+    // select a raw discarded target while that branch is still visible.
+    if (hasEffectivePostRevertBranch(currentSession, state?.postRevertBranch[sessionId])) return
 
     await refetchSessionMessages(sessionId)
     const messages = getSyncMessages(sessionId)
     const userMessages = messages.filter((m) => m.role === "user")
+    // Identifier.ascending keeps lexical message IDs in server creation order.
     const targetMessage = userMessages.find((m) => m.id > revertToId)
 
     if (targetMessage) {

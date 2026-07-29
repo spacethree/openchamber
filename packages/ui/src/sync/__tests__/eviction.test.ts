@@ -188,4 +188,18 @@ describe("session cache eviction", () => {
     expect(store.message.ses_old).toBe(undefined)
     expect(store.part.msg_1).toBe(undefined)
   })
+
+  test("drops post-revert branch overlays for evicted sessions", () => {
+    const store = buildState({
+      postRevertBranch: {
+        ses_old: { revertMessageID: "msg_0", replacementMessageID: "msg_1" },
+        ses_kept: { revertMessageID: "msg_0", replacementMessageID: "msg_2" },
+      },
+    })
+
+    dropSessionCaches(store, ["ses_old"])
+
+    expect(store.postRevertBranch.ses_old).toBe(undefined)
+    expect(store.postRevertBranch.ses_kept).toEqual({ revertMessageID: "msg_0", replacementMessageID: "msg_2" })
+  })
 })

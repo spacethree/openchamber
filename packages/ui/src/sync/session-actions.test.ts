@@ -7,6 +7,7 @@ const replyCalls: Array<{ method: string; params: Record<string, unknown> }> = [
 const scopedClientDirectories: string[] = []
 const registeredSessionDirectories: Array<{ sessionID: string; directory: string }> = []
 let sessionRevertResult: { data?: unknown; error?: unknown; response?: { status?: number } } = {}
+let sessionUnrevertResult: { data?: unknown; error?: unknown; response?: { status?: number } } = {}
 let questionReplyError: unknown | null = null
 let questionRejectError: unknown | null = null
 let permissionReplyError: unknown | null = null
@@ -65,6 +66,10 @@ const mockSdk = {
     revert: mock((params: Record<string, unknown>) => {
       replyCalls.push({ method: "session.revert", params })
       return Promise.resolve(sessionRevertResult)
+    }),
+    unrevert: mock((params: Record<string, unknown>) => {
+      replyCalls.push({ method: "session.unrevert", params })
+      return Promise.resolve(sessionUnrevertResult)
     }),
     abort: mock((params: Record<string, unknown>) => {
       replyCalls.push({ method: "session.abort", params })
@@ -626,31 +631,29 @@ describe("optimisticSend target directory", () => {
     expect(currentStore.getState().session_status["session-new"]).toBe(undefined)
   })
 
-  test("commits the new branch locally and discards its optimistic shadow when sending after a revert", async () => {
+  test("keeps the authoritative revert marker and records a replacement branch when sending after a revert", async () => {
     const retainedMessage = { id: "msg_1", role: "user", sessionID: "session-reverted" } as Message
     const revertedMessage = { id: "msg_2", role: "user", sessionID: "session-reverted" } as Message
+    const revertedPart = { id: "part_2", type: "text", text: "old branch" } as Part
     const targetStore = createStore({}, {
       session: [{ id: "session-reverted", revert: { messageID: "msg_2" } } as Session],
       message: { "session-reverted": [retainedMessage, revertedMessage] },
-      part: { msg_2: [{ id: "part_2", type: "text", text: "old branch" } as Part] },
+      part: { msg_2: [revertedPart] },
     })
     const childStores = createChildStores([["/target/project", targetStore]])
     let optimisticMessage: Message | null = null
-    const optimisticShadow = new Set([revertedMessage.id])
 
     const { optimisticSend, setActionRefs, setOptimisticRefs } = await import("./session-actions")
     setActionRefs(mockSdk as unknown as OpencodeClient, childStores, () => "/target/project")
     setOptimisticRefs(
       (input) => {
         optimisticMessage = input.message
-        optimisticShadow.add(input.message.id)
         targetStore.setState((state) => ({
           message: { ...state.message, [input.sessionID]: [...(state.message[input.sessionID] ?? []), input.message] },
           part: { ...state.part, [input.message.id]: input.parts },
         }))
       },
       () => {},
-      (input) => optimisticShadow.delete(input.messageID),
     )
 
     await optimisticSend({
@@ -662,17 +665,23 @@ describe("optimisticSend target directory", () => {
       send: async () => {},
     })
 
-    expect(targetStore.getState().session[0].revert).toBe(undefined)
-    expect(targetStore.getState().message["session-reverted"].map((message) => message.id)).toEqual([
+    const current = targetStore.getState()
+    // The server keeps session.revert authoritative and retains the discarded
+    // branch, so the client must not clear the marker or delete messages.
+    expect(current.session[0].revert).toEqual({ messageID: "msg_2" })
+    expect(current.message["session-reverted"].map((message) => message.id)).toEqual([
       "msg_1",
+      "msg_2",
       (optimisticMessage as unknown as Message).id,
     ])
-    expect(targetStore.getState().part.msg_2).toBe(undefined)
-    expect(optimisticShadow.has(revertedMessage.id)).toBe(false)
-    expect(optimisticShadow.has((optimisticMessage as unknown as Message).id)).toBe(true)
+    expect(current.part.msg_2).toEqual([revertedPart])
+    expect(current.postRevertBranch["session-reverted"]).toEqual({
+      revertMessageID: "msg_2",
+      replacementMessageID: (optimisticMessage as unknown as Message).id,
+    })
   })
 
-  test("restores the reverted branch when sending fails", async () => {
+  test("retires the replacement overlay when sending after a revert fails", async () => {
     const retainedMessage = { id: "msg_1", role: "user", sessionID: "session-reverted" } as Message
     const revertedMessage = { id: "msg_2", role: "user", sessionID: "session-reverted" } as Message
     const revertedPart = { id: "part_2", type: "text", text: "old branch" } as Part
@@ -705,9 +714,12 @@ describe("optimisticSend target directory", () => {
       send: async () => { throw new Error("rejected") },
     })).rejects.toThrow("rejected")
 
-    expect(targetStore.getState().session[0].revert?.messageID).toBe("msg_2")
-    expect(targetStore.getState().message["session-reverted"]).toEqual([retainedMessage, revertedMessage])
-    expect(targetStore.getState().part.msg_2).toEqual([revertedPart])
+    const current = targetStore.getState()
+    expect(current.session[0].revert?.messageID).toBe("msg_2")
+    // Nothing was deleted on send, so nothing needs restoring on failure.
+    expect(current.message["session-reverted"]).toEqual([retainedMessage, revertedMessage])
+    expect(current.part.msg_2).toEqual([revertedPart])
+    expect(current.postRevertBranch["session-reverted"]).toBe(undefined)
   })
 
   test("allows callers to block final send when runtime changes after optimistic insert", async () => {
@@ -976,6 +988,84 @@ describe("revertToMessage passes session directory", () => {
     expect((thrown as Error).message).toContain("session.revert failed (500)")
     expect((sessionStore.getState().session[0] as Session & { revert?: { messageID?: string } }).revert).toBe(undefined)
     expect(inputState.pendingInputText).toBe("previous draft")
+  })
+
+  test("clears the session's replacement overlay after a confirmed newer revert", async () => {
+    const session = { id: "session-a", time: { created: 1 }, revert: { messageID: "msg_1" } } as Session
+    const targetMessage = { id: "msg_2", sessionID: "session-a", role: "user", time: { created: 2 } } as Message
+    const targetPart = { id: "prt_2", messageID: "msg_2", type: "text", text: "edit this" } as Part
+    const sessionStore = createStore({}, {
+      session: [session],
+      message: { "session-a": [targetMessage] },
+      part: { "msg_2": [targetPart] },
+      postRevertBranch: {
+        "session-a": { revertMessageID: "msg_1", replacementMessageID: "msg_1z" },
+        "session-b": { revertMessageID: "msg_b", replacementMessageID: "msg_bz" },
+      },
+    })
+    const childStores = createChildStores([["/test/project", sessionStore]])
+    sessionRevertResult = { data: { id: "session-a", time: { created: 1, updated: 2 }, revert: { messageID: "msg_2" } } }
+
+    const { setActionRefs, revertToMessage } = await import("./session-actions")
+    setActionRefs(mockSdk as unknown as OpencodeClient, childStores, () => "/test/project")
+
+    await revertToMessage("session-a", "msg_2")
+
+    const overlays = sessionStore.getState().postRevertBranch
+    expect(overlays["session-a"]).toBe(undefined)
+    // Overlays of unrelated sessions must survive.
+    expect(overlays["session-b"]).toEqual({ revertMessageID: "msg_b", replacementMessageID: "msg_bz" })
+  })
+
+  test("restores the prior replacement overlay when a newer revert is rejected", async () => {
+    const previousRevert = { messageID: "msg_1", snapshot: "before" }
+    const session = { id: "session-a", time: { created: 1 }, revert: previousRevert } as Session
+    const targetMessage = { id: "msg_2", sessionID: "session-a", role: "user", time: { created: 2 } } as Message
+    const targetPart = { id: "prt_2", messageID: "msg_2", type: "text", text: "edit this" } as Part
+    const sessionStore = createStore({}, {
+      session: [session],
+      message: { "session-a": [targetMessage] },
+      part: { "msg_2": [targetPart] },
+      postRevertBranch: {
+        "session-a": { revertMessageID: "msg_1", replacementMessageID: "msg_1z" },
+      },
+    })
+    const childStores = createChildStores([["/test/project", sessionStore]])
+    sessionRevertResult = { error: { message: "rejected" }, response: { status: 500 } }
+
+    const { setActionRefs, revertToMessage } = await import("./session-actions")
+    setActionRefs(mockSdk as unknown as OpencodeClient, childStores, () => "/test/project")
+
+    await expect(revertToMessage("session-a", "msg_2")).rejects.toThrow("session.revert failed (500)")
+
+    const current = sessionStore.getState()
+    expect(current.session[0]?.revert).toEqual(previousRevert)
+    expect(current.postRevertBranch["session-a"]).toEqual({
+      revertMessageID: "msg_1",
+      replacementMessageID: "msg_1z",
+    })
+  })
+
+  test("clears the session's replacement overlay on unrevert", async () => {
+    const session = { id: "session-a", time: { created: 1 }, revert: { messageID: "msg_1" } } as Session
+    const sessionStore = createStore({}, {
+      session: [session],
+      postRevertBranch: {
+        "session-a": { revertMessageID: "msg_1", replacementMessageID: "msg_1z" },
+        "session-b": { revertMessageID: "msg_b", replacementMessageID: "msg_bz" },
+      },
+    })
+    const childStores = createChildStores([["/test/project", sessionStore]])
+    sessionUnrevertResult = { data: { id: "session-a", time: { created: 1, updated: 2 } } }
+
+    const { setActionRefs, unrevertSession } = await import("./session-actions")
+    setActionRefs(mockSdk as unknown as OpencodeClient, childStores, () => "/test/project")
+
+    await unrevertSession("session-a")
+
+    const overlays = sessionStore.getState().postRevertBranch
+    expect(overlays["session-a"]).toBe(undefined)
+    expect(overlays["session-b"]).toEqual({ revertMessageID: "msg_b", replacementMessageID: "msg_bz" })
   })
 })
 

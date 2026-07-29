@@ -17,10 +17,11 @@ const textPart = (id: string, text: string): Part => ({
   text,
 } as Part);
 
-const state = (partial: Partial<State>): Pick<State, 'session' | 'message' | 'part'> => ({
+const state = (partial: Partial<State>): Pick<State, 'session' | 'message' | 'part' | 'postRevertBranch'> => ({
   session: [],
   message: {},
   part: {},
+  postRevertBranch: {},
   ...partial,
 });
 
@@ -94,5 +95,30 @@ describe('buildUserMessageHistorySnapshot', () => {
     );
 
     expect(snapshot.history).toEqual(['kept']);
+  });
+
+  test('includes replacement branch user messages while hiding the discarded interval', () => {
+    const snapshot = buildUserMessageHistorySnapshot(
+      state({
+        session: [{ id: 'ses_1', revert: { messageID: 'user_2' } } as State['session'][number]],
+        message: {
+          ses_1: [
+            message('user_1', 'user'),
+            message('user_2', 'user'),
+            message('assistant_1', 'assistant'),
+            message('user_3', 'user'),
+          ],
+        },
+        part: {
+          user_1: [textPart('part_user_1', 'kept')],
+          user_2: [textPart('part_user_2', 'discarded')],
+          user_3: [textPart('part_user_3', 'replacement')],
+        },
+        postRevertBranch: { ses_1: { revertMessageID: 'user_2', replacementMessageID: 'user_3' } },
+      }),
+      'ses_1',
+    );
+
+    expect(snapshot.history).toEqual(['replacement', 'kept']);
   });
 });

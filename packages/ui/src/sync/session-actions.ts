@@ -18,6 +18,11 @@ import { materializeSessionSnapshots } from "./materialization"
 import { stripMessageDiffSnapshots, stripSessionDiffSnapshots } from "./sanitize"
 import { sessionEvents } from "@/lib/sessionEvents"
 import {
+  clearPostRevertBranchOverlay,
+  reconcilePostRevertBranchOverlay,
+  setPostRevertBranchOverlay,
+} from "./message-visibility"
+import {
   getOriginalSessionID,
   getSessionMetadata,
   isReviewSession,
@@ -203,13 +208,19 @@ function updateLiveSession(session: Session, directory?: string): boolean {
 
   for (const [, store] of candidates) {
     if (!store) continue
-    const current = store.getState().session
+    const state = store.getState()
+    const current = state.session
     const index = current.findIndex((item) => item.id === session.id)
     if (index === -1) continue
 
     const next = [...current]
-    next[index] = mergeSessionDirectoryMetadata(session, current[index])
-    store.setState({ session: next })
+    const nextSession = mergeSessionDirectoryMetadata(session, current[index])
+    next[index] = nextSession
+    store.setState({
+      session: next,
+      // A marker transition authoritatively retires the replacement overlay.
+      postRevertBranch: reconcilePostRevertBranchOverlay(state.postRevertBranch, session.id, nextSession),
+    })
     return true
   }
 
@@ -919,40 +930,29 @@ export async function optimisticSend(input: {
   const stateBeforeSend = store.getState()
   const sessionBeforeSend = stateBeforeSend.session.find((session) => session.id === input.sessionId)
   const revertMessageID = sessionBeforeSend?.revert?.messageID
-  const revertedMessages = revertMessageID
-    ? (stateBeforeSend.message[input.sessionId] ?? []).filter((message) => message.id >= revertMessageID)
-    : []
-  const revertedParts = new Map(
-    revertedMessages.map((message) => [message.id, stateBeforeSend.part[message.id] ?? []] as const),
-  )
-
-  if (revertMessageID) {
-    const session = stateBeforeSend.session.map((candidate) => (
-      candidate.id === input.sessionId ? { ...candidate, revert: undefined } as Session : candidate
-    ))
-    const message = {
-      ...stateBeforeSend.message,
-      [input.sessionId]: (stateBeforeSend.message[input.sessionId] ?? []).filter((candidate) => candidate.id < revertMessageID),
-    }
-    const part = { ...stateBeforeSend.part }
-    for (const revertedMessage of revertedMessages) delete part[revertedMessage.id]
-    store.setState({ session, message, part })
-
-    // A server-backed user message can still remain in the loader's optimistic
-    // shadow until a page fetch confirms it. Forget the reverted branch there
-    // too, or the next tail refresh will merge those deleted messages back in.
-    for (const revertedMessage of revertedMessages) {
-      _optimisticConfirm?.({
-        sessionID: input.sessionId,
-        directory: targetDirectory,
-        messageID: revertedMessage.id,
-      })
-    }
-  }
 
   const messageID = ascendingId("msg")
   input.onMessageID?.(messageID)
   const textPartId = ascendingId("prt")
+
+  if (revertMessageID) {
+    // Keep session.revert authoritative: the server retains the discarded
+    // branch, so deleting it locally would let any later authoritative
+    // materialization resurrect it next to this replacement (duplicates).
+    // Instead record the replacement boundary in the local overlay; timeline
+    // visibility is derived from marker + overlay.
+    const current = store.getState()
+    // An earlier replacement against the same marker already opened the
+    // branch; keep its boundary so this send does not re-hide it.
+    if (current.postRevertBranch[input.sessionId]?.revertMessageID !== revertMessageID) {
+      store.setState({
+        postRevertBranch: setPostRevertBranchOverlay(current.postRevertBranch, input.sessionId, {
+          revertMessageID,
+          replacementMessageID: messageID,
+        }),
+      })
+    }
+  }
 
   const optimisticParts: Part[] = [
     { id: textPartId, type: "text", text: input.content } as Part,
@@ -1019,29 +1019,14 @@ export async function optimisticSend(input: {
       messageID,
     })
     const rollbackState = store.getState()
-    let session = rollbackState.session
-    let message = rollbackState.message
-    let part = rollbackState.part
 
-    if (revertMessageID) {
-      session = rollbackState.session.map((candidate) => (
-        candidate.id === input.sessionId ? { ...candidate, revert: sessionBeforeSend?.revert } as Session : candidate
-      ))
-      message = {
-        ...rollbackState.message,
-        [input.sessionId]: [...(rollbackState.message[input.sessionId] ?? []), ...revertedMessages]
-          .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
-      }
-      part = { ...rollbackState.part }
-      for (const [revertedMessageID, parts] of revertedParts) {
-        part[revertedMessageID] = parts
-      }
-    }
-
+    // The discarded branch was never deleted, so rollback only retires the
+    // overlay this send opened; a newer marker/overlay is left untouched.
+    const overlay = rollbackState.postRevertBranch[input.sessionId]
     store.setState({
-      session,
-      message,
-      part,
+      postRevertBranch: overlay?.replacementMessageID === messageID
+        ? clearPostRevertBranchOverlay(rollbackState.postRevertBranch, input.sessionId)
+        : rollbackState.postRevertBranch,
       session_status: {
         ...rollbackState.session_status,
         [input.sessionId]: { type: "idle" as const },
@@ -1408,14 +1393,14 @@ export async function revertToMessage(sessionId: string, messageId: string): Pro
     submittedFileParts = parts.filter((p) => p.type === "file" && !isSyntheticPart(p)) as Array<Record<string, unknown>>
   }
 
-  // Optimistically set only the revert marker. Keep messages and parts in the
-  // local store; visible-message selectors derive the displayed timeline from
-  // session.revert. This matches the server model and preserves reverted
-  // messages for the restore dock without maintaining a separate shadow copy.
+  // Optimistically set only the revert marker. Keep messages, parts, and any
+  // prior replacement overlay in the local store; visibility helpers ignore an
+  // overlay whose captured marker does not match the current one.
   const prevRevert = (() => {
     const s = state.session.find((s) => s.id === sessionId)
     return (s as Session & { revert?: unknown })?.revert
   })()
+  const previousOverlay = state.postRevertBranch[sessionId]
   const sessions = [...state.session]
   const sessionIdx = sessions.findIndex((s) => s.id === sessionId)
 
@@ -1455,13 +1440,20 @@ export async function revertToMessage(sessionId: string, messageId: string): Pro
     const idx = updated.findIndex((s) => s.id === sessionId)
     if (idx >= 0) {
       updated[idx] = revertedSession
-      store.setState({ session: updated })
     }
+    store.setState({
+      ...(idx >= 0 ? { session: updated } : {}),
+      // The authoritative marker moved, so any prior replacement branch is stale.
+      postRevertBranch: clearPostRevertBranchOverlay(current.postRevertBranch, sessionId),
+    })
     if (directory) {
       sessionEvents.requestGitRefresh({ directory })
     }
   } catch (err) {
-    // Rollback: restore removed messages + revert marker
+    // Rollback: restore the previous marker and this session's captured
+    // overlay. Reconciliation during the in-flight request may have retired
+    // the overlay while the optimistic marker was active; the confirmed state
+    // is the previous marker plus its replacement branch.
     const current = store.getState()
     const rollback = [...current.session]
     const idx = rollback.findIndex((s) => s.id === sessionId)
@@ -1469,7 +1461,8 @@ export async function revertToMessage(sessionId: string, messageId: string): Pro
       rollback[idx] = { ...rollback[idx], revert: prevRevert } as Session
     }
     store.setState({
-      session: rollback,
+      ...(idx >= 0 ? { session: rollback } : {}),
+      postRevertBranch: setPostRevertBranchOverlay(current.postRevertBranch, sessionId, previousOverlay),
     })
     // Rollback input store: restore previous text and attachments
     useInputStore.setState({
@@ -1538,8 +1531,13 @@ export async function unrevertSession(sessionId: string): Promise<void> {
   const idx = sessions.findIndex((s) => s.id === sessionId)
   if (idx >= 0) {
     sessions[idx] = unrevertedSession
-    store.setState({ session: sessions })
   }
+  store.setState({
+    ...(idx >= 0 ? { session: sessions } : {}),
+    // Unrevert restores the discarded branch authoritatively; the replacement
+    // overlay must not keep hiding it.
+    postRevertBranch: clearPostRevertBranchOverlay(current.postRevertBranch, sessionId),
+  })
   for (let attempt = 0; attempt < UNREVERT_REFETCH_ATTEMPTS; attempt += 1) {
     if (attempt > 0) await wait(UNREVERT_REFETCH_RETRY_MS)
     await refetchSessionMessages(sessionId)

@@ -47,6 +47,8 @@ import { toast } from "@/components/ui"
 import { appendNotification } from "./notification-store"
 import { applyGlobalSessionStatusEvent, applyGlobalSessionStatusSnapshot, useGlobalSessionStatusStore } from "./global-session-status"
 import type { State } from "./types"
+import type { PostRevertBranchOverlay } from "./types"
+import { getEffectiveVisibleMessages, getSessionRevertMessageID } from "./message-visibility"
 import type { SessionStatus } from "@opencode-ai/sdk/v2/client"
 import type { PermissionRequest } from "@/types/permission"
 import type { QuestionRequest } from "@/types/question"
@@ -2565,6 +2567,7 @@ type SessionMessageRecordsSnapshot = {
   sourceMessages: Message[]
   visibleMessages: Message[]
   revertMessageID?: string
+  postRevertBranch?: PostRevertBranchOverlay
   suspendPartUpdates: boolean
   suspendedPartUpdatesMessageID?: string
   list: SessionMessageRecord[]
@@ -2747,10 +2750,12 @@ const getReusableSessionMessageRecordsSnapshot = (
   if (!cached) return undefined
   const sourceMessages = state.message[sessionID] ?? EMPTY_MESSAGES
   const session = state.session.find((candidate) => candidate.id === sessionID)
-  const revertMessageID = (session as { revert?: { messageID?: string } } | undefined)?.revert?.messageID
+  const revertMessageID = getSessionRevertMessageID(session)
+  const postRevertBranch = state.postRevertBranch?.[sessionID]
   if (
     cached.sourceMessages === sourceMessages
     && cached.revertMessageID === revertMessageID
+    && cached.postRevertBranch === postRevertBranch
     && cached.suspendPartUpdates === suspendPartUpdates
     && cached.suspendedPartUpdatesMessageID === suspendedPartUpdatesMessageID
     && snapshotPartsMatchState(cached, state)
@@ -2764,27 +2769,32 @@ function getVisibleMessagesForSession(state: State, sessionID: string, previous?
   sourceMessages: Message[]
   visibleMessages: Message[]
   revertMessageID?: string
+  postRevertBranch?: PostRevertBranchOverlay
 } {
   const sourceMessages = state.message[sessionID] ?? EMPTY_MESSAGES
   const session = state.session.find((candidate) => candidate.id === sessionID)
-  const revertMessageID = (session as { revert?: { messageID?: string } } | undefined)?.revert?.messageID
+  const revertMessageID = getSessionRevertMessageID(session)
+  const postRevertBranch = state.postRevertBranch?.[sessionID]
 
   if (
     previous
     && previous.sourceMessages === sourceMessages
     && previous.revertMessageID === revertMessageID
+    && previous.postRevertBranch === postRevertBranch
   ) {
     return {
       sourceMessages,
       visibleMessages: previous.visibleMessages,
       revertMessageID,
+      postRevertBranch,
     }
   }
 
   return {
     sourceMessages,
-    visibleMessages: revertMessageID ? sourceMessages.filter((message) => message.id < revertMessageID) : sourceMessages,
+    visibleMessages: getEffectiveVisibleMessages(sourceMessages, session, postRevertBranch),
     revertMessageID,
+    postRevertBranch,
   }
 }
 
@@ -2795,7 +2805,7 @@ export function buildSessionMessageRecordsSnapshot(
   suspendPartUpdates = false,
   suspendedPartUpdatesMessageID?: string,
 ): SessionMessageRecordsSnapshot {
-  const { sourceMessages, visibleMessages, revertMessageID } = getVisibleMessagesForSession(state, sessionID, previous)
+  const { sourceMessages, visibleMessages, revertMessageID, postRevertBranch } = getVisibleMessagesForSession(state, sessionID, previous)
   const nextById = new Map<string, SessionMessageRecord>()
   const nextList = visibleMessages.map((message) => {
     const previousRecord = previous?.byId.get(message.id)
@@ -2832,6 +2842,7 @@ export function buildSessionMessageRecordsSnapshot(
     sourceMessages,
     visibleMessages,
     revertMessageID,
+    postRevertBranch,
     suspendPartUpdates,
     suspendedPartUpdatesMessageID,
     list: nextList,
@@ -2921,10 +2932,14 @@ export function useUserMessageHistory(sessionID: string, directory?: string): st
       notify()
     })
     const unsubscribeSession = store.subscribe((state, previous) => {
-      if (state.session === previous.session) return
+      if (state.session === previous.session && state.postRevertBranch === previous.postRevertBranch) return
       const currentRevert = state.session.find((session) => session.id === sessionID)?.revert?.messageID
       const previousRevert = previous.session.find((session) => session.id === sessionID)?.revert?.messageID
-      if (currentRevert !== previousRevert) notify()
+      if (currentRevert !== previousRevert) {
+        notify()
+        return
+      }
+      if (state.postRevertBranch[sessionID] !== previous.postRevertBranch[sessionID]) notify()
     })
     return () => {
       unsubscribeMessages()
@@ -2953,6 +2968,7 @@ export function useSessionMessageRecords(
     sourceMessages: EMPTY_MESSAGES,
     visibleMessages: EMPTY_MESSAGES,
     revertMessageID: undefined,
+    postRevertBranch: undefined,
     suspendPartUpdates: Boolean(options?.suspendPartUpdates),
     suspendedPartUpdatesMessageID: options?.suspendPartUpdatesForMessageId ?? undefined,
     list: [],
@@ -3025,10 +3041,14 @@ export function useSessionMessageRecords(
       notify()
     })
     const unsubscribeSession = store.subscribe((state, previous) => {
-      if (state.session === previous.session) return
+      if (state.session === previous.session && state.postRevertBranch === previous.postRevertBranch) return
       const currentRevert = state.session.find((session) => session.id === sessionID)?.revert?.messageID
       const previousRevert = previous.session.find((session) => session.id === sessionID)?.revert?.messageID
-      if (currentRevert !== previousRevert) notify()
+      if (currentRevert !== previousRevert) {
+        notify()
+        return
+      }
+      if (state.postRevertBranch[sessionID] !== previous.postRevertBranch[sessionID]) notify()
     })
     return () => {
       unsubscribeMessages()

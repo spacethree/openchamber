@@ -1,5 +1,6 @@
 import type { Message, Part } from '@opencode-ai/sdk/v2/client';
 import type { State } from './types';
+import { getSessionRevertMessageID, isEffectivelyVisibleMessage } from './message-visibility';
 
 type UserMessageHistoryRecord = {
   message: Message;
@@ -50,7 +51,7 @@ const areRecordsEqual = (left: UserMessageHistoryRecord[], right: UserMessageHis
 };
 
 export const buildUserMessageHistorySnapshot = (
-  state: Pick<State, 'session' | 'message' | 'part'>,
+  state: Pick<State, 'session' | 'message' | 'part' | 'postRevertBranch'>,
   sessionID: string,
   previous: UserMessageHistorySnapshot = EMPTY_USER_MESSAGE_HISTORY_SNAPSHOT,
 ): UserMessageHistorySnapshot => {
@@ -60,14 +61,16 @@ export const buildUserMessageHistorySnapshot = (
 
   const messages = state.message[sessionID] ?? [];
   const session = state.session.find((candidate) => candidate.id === sessionID);
-  const revertMessageID = (session as { revert?: { messageID?: string } } | undefined)?.revert?.messageID;
+  const revertMessageID = getSessionRevertMessageID(session);
+  const postRevertBranch = state.postRevertBranch[sessionID];
   const records: UserMessageHistoryRecord[] = [];
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message.role !== 'user') {
       continue;
     }
-    if (revertMessageID && message.id >= revertMessageID) {
+    // Skip the discarded interval; keep the visible replacement branch.
+    if (!isEffectivelyVisibleMessage(message.id, session, postRevertBranch)) {
       continue;
     }
     records.push({

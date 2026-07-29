@@ -34,6 +34,64 @@ const state = (partial: Partial<State>): State => ({
 });
 
 describe('buildSessionMessageRecordsSnapshot', () => {
+  test('keeps a replacement branch visible without clearing the authoritative revert marker', () => {
+    const session = { id: 'ses_1', revert: { messageID: 'msg_002' } } as State['session'][number];
+    const previous = buildSessionMessageRecordsSnapshot(
+      state({
+        session: [session],
+        message: {
+          ses_1: [
+            message('msg_001', 'user'),
+            message('msg_002', 'user'),
+            message('msg_003', 'assistant'),
+            message('msg_004', 'user'),
+          ],
+        },
+      }),
+      'ses_1',
+    );
+
+    const next = buildSessionMessageRecordsSnapshot(
+      state({
+        session: [session],
+        message: {
+          ses_1: [
+            message('msg_001', 'user'),
+            message('msg_002', 'user'),
+            message('msg_003', 'assistant'),
+            message('msg_004', 'user'),
+          ],
+        },
+        postRevertBranch: { ses_1: { revertMessageID: 'msg_002', replacementMessageID: 'msg_004' } },
+      }),
+      'ses_1',
+      previous,
+    );
+
+    expect(previous.list.map((record) => record.info.id)).toEqual(['msg_001']);
+    expect(next.list.map((record) => record.info.id)).toEqual(['msg_001', 'msg_004']);
+  });
+
+  test('ignores the replacement overlay after the authoritative marker changes', () => {
+    const snapshot = buildSessionMessageRecordsSnapshot(
+      state({
+        session: [{ id: 'ses_1', revert: { messageID: 'msg_003' } } as State['session'][number]],
+        message: {
+          ses_1: [
+            message('msg_001', 'user'),
+            message('msg_002', 'user'),
+            message('msg_003', 'assistant'),
+            message('msg_004', 'user'),
+          ],
+        },
+        postRevertBranch: { ses_1: { revertMessageID: 'msg_002', replacementMessageID: 'msg_004' } },
+      }),
+      'ses_1',
+    );
+
+    expect(snapshot.list.map((record) => record.info.id)).toEqual(['msg_001', 'msg_002']);
+  });
+
   test('only suspends part updates for the active streaming message', () => {
     const user = message('user_1', 'user');
     const assistant1 = message('assistant_1', 'assistant', 'user_1');

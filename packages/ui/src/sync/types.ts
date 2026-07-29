@@ -38,6 +38,22 @@ export type ProjectMeta = {
   }
 }
 
+/**
+ * Local UI-continuity overlay for a post-revert replacement branch.
+ *
+ * The server keeps `session.revert` authoritative and retains the discarded
+ * messages, so after sending a replacement the timeline is derived as:
+ * visible = messages before the marker OR messages from the replacement
+ * onward. The overlay is valid only while `revertMessageID` still matches the
+ * session's authoritative marker; it is never persisted.
+ */
+export type PostRevertBranchOverlay = {
+  revertMessageID: string
+  replacementMessageID: string
+}
+
+export type PostRevertBranchOverlays = Record<string, PostRevertBranchOverlay | undefined>
+
 /** Per-directory store state */
 export type State = {
   status: "loading" | "partial" | "complete"
@@ -66,6 +82,7 @@ export type State = {
   limit: number
   message: Record<string, Message[]>
   part: Record<string, Part[]>
+  postRevertBranch: PostRevertBranchOverlays
 }
 
 /** Global store state */
@@ -140,6 +157,7 @@ export const INITIAL_STATE: State = {
   limit: 5,
   message: {},
   part: {},
+  postRevertBranch: {},
 }
 
 export const INITIAL_GLOBAL_STATE: GlobalState = {

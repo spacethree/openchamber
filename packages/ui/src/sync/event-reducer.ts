@@ -15,6 +15,7 @@ import { dropSessionCaches } from "./session-cache"
 import { stripSessionDiffSnapshots } from "./sanitize"
 import { syncDebug } from "./debug"
 import { shouldSkipStaleSessionEvent } from "./session-event-freshness"
+import { clearPostRevertBranchOverlay, reconcilePostRevertBranchOverlay } from "./message-visibility"
 
 const SKIP_PARTS = new Set(["patch", "step-start", "step-finish"])
 const DELTA_OVERLAP_FIELDS = ["text", "output"] as const
@@ -252,6 +253,7 @@ export function applyDirectoryEvent(
         trimSessions(draft)
         if (!info.parentID) draft.sessionTotal += 1
       }
+      reconcileOverlayAfterSessionReplace(draft, info)
       markSessionEvent(info.id, false)
       return true
     }
@@ -282,6 +284,7 @@ export function applyDirectoryEvent(
         sessions.splice(result.index, 0, info)
         trimSessions(draft)
       }
+      reconcileOverlayAfterSessionReplace(draft, info)
       markSessionEvent(info.id, false)
       return true
     }
@@ -576,6 +579,17 @@ export function applyDirectoryEvent(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * A replacement-branch overlay is valid only while the exact same revert
+ * marker survives. Assign (never mutate in place) so no pre-clone is needed.
+ */
+function reconcileOverlayAfterSessionReplace(draft: State, next: Session) {
+  const overlays = draft.postRevertBranch
+  if (!overlays?.[next.id]) return
+  const reconciled = reconcilePostRevertBranchOverlay(overlays, next.id, next)
+  if (reconciled !== overlays) draft.postRevertBranch = reconciled
+}
+
 function trimSessions(draft: State) {
   if (draft.session.length <= draft.limit) return
   // Keep sessions that have pending permissions (they need to stay visible)
@@ -589,6 +603,9 @@ function trimSessions(draft: State) {
     const candidate = draft.session[0]
     if (hasPermission.has(candidate.id)) break
     draft.session.shift()
+    if (draft.postRevertBranch?.[candidate.id]) {
+      draft.postRevertBranch = clearPostRevertBranchOverlay(draft.postRevertBranch, candidate.id)
+    }
   }
 }
 
