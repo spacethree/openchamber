@@ -12,6 +12,7 @@ import { registerProjectContextRoutes } from '../project-context/routes.js';
 import { registerAgentMemoryRoutes } from '../agent-memory/routes.js';
 import { registerSessionKnowledgeRoutes } from '../session-knowledge/routes.js';
 import { registerPermissionAutoAcceptRoutes } from '../permission-auto-accept/runtime.js';
+import { registerPlatformConnectorRoutes } from '../platform-connector/routes.js';
 import { registerConfigEntityRoutes } from './config-entity-routes.js';
 import { registerSettingsUtilityRoutes } from './core-routes.js';
 import { registerProjectIconRoutes } from './project-icon-routes.js';
@@ -131,6 +132,7 @@ export const createFeatureRoutesRuntime = (dependencies) => {
       writeSseEvent,
       emitSessionCreatedEvent,
       permissionAutoAcceptRuntime,
+      platformConnectorRuntime,
     } = routeDependencies;
 
     registerSettingsUtilityRoutes(app, {
@@ -140,6 +142,8 @@ export const createFeatureRoutesRuntime = (dependencies) => {
     });
 
     registerPermissionAutoAcceptRoutes(app, permissionAutoAcceptRuntime);
+
+    registerPlatformConnectorRoutes(app, { runtime: platformConnectorRuntime });
 
     registerOpenCodeRoutes(app, {
       crypto,

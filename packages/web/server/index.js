@@ -113,6 +113,8 @@ import { createOpenChamberSessionService } from './lib/openchamber-sessions/rout
 import { createScheduledTaskService } from './lib/scheduled-tasks/service.js';
 import { createOpenChamberControlService } from './lib/openchamber-control/service.js';
 import { OpenChamberControlError } from './lib/openchamber-control/error.js';
+import { createPlatformConnectorRuntime } from './lib/platform-connector/runtime.js';
+import { collectCapabilities } from './lib/platform-connector/capabilities.js';
 import webPush from 'web-push';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1378,6 +1380,44 @@ const openChamberControlService = createOpenChamberControlService({
   }),
 });
 
+const resolveLoopbackUiUrl = () => {
+  const address = server?.address?.();
+  const activePort = typeof address === 'object' && address ? address.port : null;
+  return activePort ? `http://127.0.0.1:${activePort}` : null;
+};
+
+/**
+ * The outbound link to a Humble Good Site. Built here because it needs the
+ * control service for its capability report and must exist before the graceful
+ * shutdown runtime captures it; started only once OpenCode is up, so the first
+ * heartbeat reports the real model and agent catalog rather than an empty one.
+ */
+const platformConnectorRuntime = createPlatformConnectorRuntime({
+  logger: console,
+  dataDir: OPENCHAMBER_DATA_DIR,
+  env: process.env,
+  collectCapabilities: () => collectCapabilities({
+    executeAction: (action, input) => openChamberControlService.execute(action, input),
+    openCodeFetch: async (fetchPath) => {
+      const response = await fetch(buildOpenCodeUrl(fetchPath, ''), {
+        method: 'GET',
+        headers: { Accept: 'application/json', ...getOpenCodeAuthHeaders() },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) throw new Error(`OpenCode GET ${fetchPath} failed with ${response.status}`);
+      return response.json();
+    },
+    versions: {
+      openchamberVersion: OPENCHAMBER_VERSION,
+      // This instance's own listener. It is where the UI lives on the box, and
+      // it is the only address the server can state as fact; a reachable
+      // external URL is the operator's tunnel or tailnet name, not ours to
+      // invent.
+      uiUrl: resolveLoopbackUiUrl(),
+    },
+  }),
+});
+
 const ensureGlobalWatcherStarted = async () => {
   if (globalWatcherStartPromise) {
     return globalWatcherStartPromise;
@@ -1453,6 +1493,7 @@ const gracefulShutdownRuntime = createGracefulShutdownRuntime({
   },
   tunnelAuthController,
   scheduledTasksRuntime,
+  platformConnectorRuntime,
 });
 
 const gracefulShutdown = (...args) => gracefulShutdownRuntime.gracefulShutdown(...args);
@@ -1910,6 +1951,7 @@ async function main(options = {}) {
     getOpenChamberEventClients: () => uiOpenChamberEventClients,
     writeSseEvent,
     permissionAutoAcceptRuntime,
+    platformConnectorRuntime,
   });
 
   const startupPipelineResult = await startupPipelineRuntime.run({
@@ -1971,6 +2013,15 @@ async function main(options = {}) {
   } catch (error) {
     console.warn('[ScheduledTasks] Failed to start runtime:', error?.message || error);
   }
+
+  // Started after the listener is up and OpenCode has been bootstrapped, for the
+  // same reason scheduled tasks are: the first heartbeat carries the capability
+  // report, and a report collected before OpenCode answers would tell the
+  // platform this instance can run nothing. Not awaited, because a slow or
+  // unreachable platform must not hold up a server that is already serving.
+  void platformConnectorRuntime.start().catch((error) => {
+    console.warn('[platform-connector] Failed to start runtime:', error?.message || error);
+  });
 
   // Only opens a relay control socket when the user opted in (config enabled).
   // Reconcile the relay lifecycle from demand on startup: run it if any relay
