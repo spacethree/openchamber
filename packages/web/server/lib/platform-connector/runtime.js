@@ -212,9 +212,17 @@ export const createPlatformConnectorRuntime = (dependencies) => {
     }
 
     if (config.revokedAt) {
-      status = STATUS_REVOKED;
-      lastError = 'The platform revoked this server';
-      return;
+      // A revoked bearer is dead for good, but the operator can mint a fresh
+      // enrollment token and restart: enroll() only acts when the env carries
+      // one, and its save() replaces the revoked record outright.
+      const fresh = await enroll();
+      if (fresh) {
+        config = fresh;
+      } else {
+        status = STATUS_REVOKED;
+        lastError = 'The platform revoked this server';
+        return;
+      }
     }
 
     await heartbeat();

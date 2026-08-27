@@ -65,9 +65,9 @@ export const createPlatformConnectorConfigStore = (dependencies) => {
       return parseConfig(JSON.parse(await fsPromises.readFile(filePath, 'utf8')));
     } catch (error) {
       if (error?.code !== 'ENOENT') {
-        // The message names the file, never its contents: the contents are the
-        // bearer.
-        logger.warn?.(`[platform-connector] ignoring unreadable ${CONFIG_FILENAME}: ${error?.message || error}`);
+        // Never interpolate error.message here: a JSON.parse SyntaxError quotes
+        // a window of the offending input, and the input is the bearer.
+        logger.warn?.(`[platform-connector] ignoring unreadable ${CONFIG_FILENAME} (${error?.code || error?.name || 'error'})`);
       }
       return null;
     }

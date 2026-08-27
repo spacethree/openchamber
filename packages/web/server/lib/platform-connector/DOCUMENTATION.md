@@ -144,3 +144,7 @@ has been bootstrapped, alongside `scheduledTasksRuntime.start()`, so the first
 heartbeat reports a real catalog instead of an empty one. It is not awaited: a
 slow or unreachable platform must not hold up a server that is already serving.
 `stop()` clears the timer from `gracefulShutdown`.
+
+## Re-enrolling after a revoke
+
+A 401 on a heartbeat marks the connector `revoked` and stops the loop; the stored bearer is never reused. To reconnect, mint a new enrollment token on the platform (Mill servers panel), set `OPENCHAMBER_PLATFORM_URL` and `OPENCHAMBER_PLATFORM_ENROLL_TOKEN` again, and restart OpenChamber: `start()` sees `revokedAt`, enrolls with the fresh token, and replaces the revoked record. Without a fresh token the connector stays `revoked` and makes no requests.

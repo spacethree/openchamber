@@ -165,6 +165,38 @@ describe('platform connector enrollment', () => {
     expect(runtime.getStatus()).toMatchObject({ enrolled: false, status: 'unenrolled', platformUrl: null });
   });
 
+  it('re-enrolls after a revoke when a fresh enrollment token is supplied', async () => {
+    await seedEnrolledConfig({ revokedAt: '2026-08-27T16:00:00.000Z' });
+    const fetchImpl = vi.fn(async (url) => (String(url).endsWith('/enroll')
+      ? new Response(JSON.stringify({ serverId: 'srv-2', siteId: 'site-1', serverToken: 'mill_srv_fresh' }), { status: 200 })
+      : okHeartbeat()));
+    const runtime = createRuntime({
+      fetchImpl,
+      env: { OPENCHAMBER_PLATFORM_URL: PLATFORM_URL, OPENCHAMBER_PLATFORM_ENROLL_TOKEN: 'mill_enroll_fresh' },
+    });
+
+    await runtime.start();
+    runtime.stop();
+
+    expect(String(fetchImpl.mock.calls[0][0])).toBe(`${PLATFORM_URL}/api/work/mill/enroll`);
+    expect(runtime.getStatus()).toMatchObject({ enrolled: true, status: 'connected', serverId: 'srv-2' });
+    const stored = JSON.parse(await fsPromises.readFile(configPath(), 'utf8'));
+    expect(stored.revokedAt).toBeUndefined();
+    expect(stored.serverToken).toBe('mill_srv_fresh');
+  });
+
+  it('stays revoked when no fresh enrollment token is supplied', async () => {
+    await seedEnrolledConfig({ revokedAt: '2026-08-27T16:00:00.000Z' });
+    const fetchImpl = vi.fn(async () => okHeartbeat());
+    const runtime = createRuntime({ fetchImpl, env: { OPENCHAMBER_PLATFORM_URL: PLATFORM_URL } });
+
+    await runtime.start();
+    runtime.stop();
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(runtime.getStatus()).toMatchObject({ enrolled: false, status: 'revoked' });
+  });
+
   it('ignores enrollment env once a bearer is stored', async () => {
     await seedEnrolledConfig();
     const fetchImpl = vi.fn(async () => okHeartbeat());
