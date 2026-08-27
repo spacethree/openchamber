@@ -220,7 +220,10 @@ export const createPlatformConnectorRuntime = (dependencies) => {
         config = fresh;
       } else {
         status = STATUS_REVOKED;
-        lastError = 'The platform revoked this server';
+        // enroll() leaves a specific reason behind when a fresh token was
+        // presented and rejected; only fall back to the generic one when no
+        // enrollment was attempted at all.
+        lastError = lastError ?? 'The platform revoked this server';
         return;
       }
     }
